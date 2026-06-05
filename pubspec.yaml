@@ -58,6 +58,7 @@ dependencies:
   connectivity_plus: ^7.0.0
   light: ^5.0.0
   screen_brightness: ^2.1.7
+  geolocator: ^14.0.2
   
 
 dev_dependencies:

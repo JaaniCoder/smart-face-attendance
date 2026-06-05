@@ -118,6 +118,7 @@ class InitialCheckScreen extends StatefulWidget {
 class _InitialCheckScreenState extends State<InitialCheckScreen> with TickerProviderStateMixin {
   late AnimationController _bootController;
   late Animation<double> _bootAnim;
+  late Stream<DateTime> _clockStream;
 
   @override
   void initState() {
@@ -125,6 +126,7 @@ class _InitialCheckScreenState extends State<InitialCheckScreen> with TickerProv
     _bootController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
     _bootAnim = CurvedAnimation(parent: _bootController, curve: Curves.easeOut);
     _bootController.forward();
+    _clockStream = Stream.periodic(const Duration(seconds: 1), (_) => DateTime.now());
   }
 
   @override
@@ -134,6 +136,7 @@ class _InitialCheckScreenState extends State<InitialCheckScreen> with TickerProv
   }
 
   void _showBranchPicker(BuildContext context) {
+    HapticFeedback.selectionClick();
     final branches = [
       'Computer Science & Engineering',
       'Computer Science & Engineering (AI & ML)',
@@ -152,6 +155,7 @@ class _InitialCheckScreenState extends State<InitialCheckScreen> with TickerProv
       builder: (sheetContext) => _BranchPickerSheet(
         branches: branches,
         onBranchSelected: (branch) {
+          HapticFeedback.selectionClick();
           Navigator.pop(sheetContext); 
           rootNavigator.pushNamed('/attendance', arguments: branch); 
         },
@@ -174,7 +178,7 @@ class _InitialCheckScreenState extends State<InitialCheckScreen> with TickerProv
                   opacity: _bootAnim,
                   child: Column(
                     children: [
-                      SizedBox(height: 40.h),
+                      SizedBox(height: 20.h),
                       _buildHeader(),
                       const Spacer(),
                       _buildBiometricIcon(),
@@ -195,13 +199,33 @@ class _InitialCheckScreenState extends State<InitialCheckScreen> with TickerProv
   Widget _buildHeader() {
     return Column(
       children: [
-        Container(
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
           padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 6.h),
           decoration: BoxDecoration(
             color: AppTheme.primaryBlue.withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(20),
           ),
-          child: Text("SYSTEM ACTIVE", style: TextStyle(color: AppTheme.primaryBlue, fontSize: 10.sp, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+          child: Row(
+            children: [
+              const Icon(Icons.wifi_rounded, size: 12, color: AppTheme.primaryBlue),
+              SizedBox(width: 4.w),
+              Text("SYSTEM ONLINE", style: TextStyle(color: AppTheme.primaryBlue, fontSize: 10.sp, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+            ],
+          ), 
+        ),
+        SizedBox(width: 12.w),
+        StreamBuilder<DateTime>(
+          stream: _clockStream,
+          builder: (context, snapshot) {
+            if(!snapshot.hasData) return const SizedBox();
+            final timeStr = "${snapshot.data!.hour.toString().padLeft(2, '0')}:${snapshot.data!.minute.toString().padLeft(2, '0')}:${snapshot.data!.second.toString().padLeft(2,'0')}";
+            return Text(timeStr, style: TextStyle(color: AppTheme.textSecondary, fontSize: 12.sp, fontWeight: FontWeight.bold, letterSpacing: 1));
+          }
+        )
+        ],
         ),
         SizedBox(height: 16.h),
         Text("Smart Attendance", style: TextStyle(color: AppTheme.textDark, fontSize: 24.sp, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
@@ -228,16 +252,17 @@ class _InitialCheckScreenState extends State<InitialCheckScreen> with TickerProv
       padding: EdgeInsets.symmetric(horizontal: 24.w),
       child: Column(
         children: [
-          _CleanButton(label: "REGISTER STUDENT", icon: Icons.person_add_rounded, color: AppTheme.primaryBlue, onPressed: () => Navigator.pushNamed(context, '/registration')),
+          _CleanButton(label: "REGISTER STUDENT", icon: Icons.person_add_rounded, color: AppTheme.primaryBlue, onPressed: () { HapticFeedback.selectionClick(); Navigator.pushNamed(context, '/registration'); }),
           SizedBox(height: 14.h),
           _CleanButton(label: "MARK ATTENDANCE", icon: Icons.fingerprint_rounded, color: AppTheme.successGreen, onPressed: () => _showBranchPicker(context)),
           SizedBox(height: 14.h),
-          _CleanButton(label: "ATTENDANCE LOGS", icon: Icons.history_rounded, color: AppTheme.textSecondary, onPressed: () => Navigator.pushNamed(context, '/history')),
+          _CleanButton(label: "ATTENDANCE LOGS", icon: Icons.history_rounded, color: AppTheme.textSecondary, onPressed: () { HapticFeedback.selectionClick(); Navigator.pushNamed(context, '/history');}),
           SizedBox(height: 14.h),
-          _CleanButton(label: "MANAGE DATABASE", icon: Icons.admin_panel_settings_rounded, color: AppTheme.warningAmber, onPressed: () => Navigator.pushNamed(context, '/admin')),
+          _CleanButton(label: "MANAGE DATABASE", icon: Icons.admin_panel_settings_rounded, color: AppTheme.warningAmber, onPressed: () { HapticFeedback.selectionClick(); Navigator.pushNamed(context, '/admin');}),
           SizedBox(height: 14.h),
           TextButton.icon(
             onPressed: () async {
+              HapticFeedback.heavyImpact();
               showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator(color: AppTheme.primaryBlue)));
               await Future.delayed(const Duration(seconds: 1));
               await auth.FirebaseAuth.instance.signOut();

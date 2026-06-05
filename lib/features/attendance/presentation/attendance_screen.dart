@@ -6,6 +6,8 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:smart_attendance_app/core/theme/app_theme.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../../core/utils/offline_sync_service.dart';
 import 'dart:io';
 import 'dart:math' as math;
@@ -13,7 +15,7 @@ import 'dart:async';
 import '../../../core/utils/ml_service.dart';
 import '../../../core/utils/auto_illumination_service.dart';
 
-enum _ScanStatus { scanning, verifying, success, alreadyMarked, notRegistered, noMatch, error }
+enum _ScanStatus { scanning, verifying, success, alreadyMarked, notRegistered, noMatch, outOfLocation, outOfTime, error }
 
 class AttendanceScreen extends StatefulWidget {
   final String selectedBranch;
@@ -24,6 +26,14 @@ class AttendanceScreen extends StatefulWidget {
 }
 
 class _AttendanceScreenState extends State<AttendanceScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
+
+  static const double campusLat = 0.0000;
+  static const double campusLng =  0.0000;
+  static const double allowedRadiusInMeters = 200.0;
+
+  static const int startHour = 9;
+  static const int endHour = 10;
+
   final AutoIlluminationService _illuminationService = AutoIlluminationService();
   CameraController? _controller;
   bool _isProcessing = false;
@@ -127,6 +137,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
     _scanLineController.stop();
   }
 
+  Future<bool> _verifyLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) throw "GPS is disabled. Please turn it on first.";
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) throw "Location permission denied.";
+    }
+    if (permission == LocationPermission.deniedForever) throw "Location permission permanently denied.";
+
+    Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+    double distance = Geolocator.distanceBetween(position.latitude, position.longitude, campusLat, campusLng);
+
+    return distance <= allowedRadiusInMeters;
+  }
+
   Future<void> _checkForFace() async {
     try {
       final XFile file = await _controller!.takePicture();
@@ -159,6 +186,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
           }
           else if (_eyesWereClosed && face.leftEyeOpenProbability! > 0.8 && face.rightEyeOpenProbability! > 0.8) {
             _livenessPassed = true;
+            HapticFeedback.lightImpact();
           }
           else {
             if (mounted) setState(() => _statusMessage = "Please BLINK to verify you are real.");
@@ -217,6 +245,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
 
       if (branchStudents.isEmpty) {
         _setStatus(_ScanStatus.notRegistered, "No local database for ${widget.selectedBranch}");
+        HapticFeedback.heavyImpact();
         _resultController.forward();
         await Future.delayed(const Duration(seconds: 3));
         return _startScanningCycle();
@@ -251,6 +280,33 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
         final String rollNo = bestMatch['roll_no'] ?? '';
         final String today = DateTime.now().toIso8601String().split('T')[0];
 
+        final now = DateTime.now();
+        if (now.hour < startHour || now.hour > endHour) {
+          _setStatus(_ScanStatus.outOfTime, "System allows attendance from $startHour:00 to $endHour:00 only");
+          HapticFeedback.heavyImpact();
+          _resultController.forward();
+          await Future.delayed(const Duration(seconds: 4));
+          return _startScanningCycle();
+        }
+
+        _setStatus(_ScanStatus.verifying, "Securing GPS satellite link...");
+        try {
+          bool isInsideCampus = await _verifyLocation();
+          if (!isInsideCampus) {
+            _setStatus(_ScanStatus.outOfLocation, "Geofence breached. You are not on campus.");
+            HapticFeedback.heavyImpact();
+            _resultController.forward();
+            await Future.delayed(const Duration(seconds: 4));
+            return _startScanningCycle();
+          }
+        } catch (e) {
+          _setStatus(_ScanStatus.error, e.toString());
+          HapticFeedback.heavyImpact();
+          _resultController.forward();
+          await Future.delayed(const Duration(seconds: 4));
+          return _startScanningCycle();
+        }
+
         bool alreadyMarked = false;
         try {
           final queue = Hive.box(OfflineSyncService.attendanceQueueBoxName);
@@ -273,12 +329,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
           if (mounted) {
             setState(() { _matchedName = name; _matchedRoll = rollNo; });
             _setStatus(_ScanStatus.success, "Attendance Marked!");
+            HapticFeedback.vibrate();
             _resultController.forward();
           }
         } else {
           if (mounted) {
             setState(() { _matchedName = name; _matchedRoll = rollNo; });
             _setStatus(_ScanStatus.alreadyMarked, "$name — Already present.");
+            HapticFeedback.lightImpact();
             _resultController.forward();
           }
         }
@@ -287,6 +345,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
 
       } else {
         _setStatus(_ScanStatus.notRegistered, "Not Recognized. Score: ${bestDistance.toStringAsFixed(2)}");
+        HapticFeedback.heavyImpact();
         _resultController.forward();
         await Future.delayed(const Duration(seconds: 4));
       }
@@ -365,20 +424,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
                   child: Center(
                     child: ScaleTransition(
                       scale: _resultScaleAnimation,
-                      child: Container(
-                        width: 300.w, padding: const EdgeInsets.all(24),
-                        decoration: BoxDecoration(color: AppTheme.surfaceLight, borderRadius: BorderRadius.circular(20), border: Border.all(color: _getBorderColor(), width: 2), boxShadow: AppTheme.softShadow),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(_getStatusIcon(), color: _getBorderColor(), size: 48.sp),
-                            SizedBox(height: 16.h),
-                            Text(_status == _ScanStatus.success ? "Welcome, $_matchedName!" : _status == _ScanStatus.notRegistered ? "Not Recognized" : _matchedName, textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textDark, fontSize: 18.sp, fontWeight: FontWeight.bold)),
-                            SizedBox(height: 8.h),
-                            Text(_statusMessage, textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary, fontSize: 13.sp)),
-                          ],
-                        ),
-                      ),
+                      child: _buildResultCard(),
                     ),
                   ),
                 ),
@@ -400,6 +446,44 @@ class _AttendanceScreenState extends State<AttendanceScreen> with TickerProvider
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildResultCard() {
+    switch (_status) {
+      case _ScanStatus.success:
+        return _resultCard(icon: Icons.check_circle_rounded, iconColor: AppTheme.successGreen, title: "Welcome, $_matchedName!", subtitle: "Roll No: $_matchedRoll", note: "Attendance marked successfully ✓", noteColor: AppTheme.successGreen, borderColor: AppTheme.successGreen);
+        case _ScanStatus.alreadyMarked:
+        return _resultCard(icon: Icons.event_available_rounded, iconColor: AppTheme.warningAmber, title: _matchedName, subtitle: "Roll No: $_matchedRoll", note: "Already marked present today", noteColor: AppTheme.warningAmber, borderColor: AppTheme.warningAmber);
+      case _ScanStatus.outOfLocation:
+        return _resultCard(icon: Icons.location_off_rounded, iconColor: AppTheme.dangerRed, title: "Access Denied", subtitle: "You are outside the geofence.", note: "Must be within ${allowedRadiusInMeters}m of campus.", noteColor: AppTheme.dangerRed, borderColor: AppTheme.dangerRed);
+      case _ScanStatus.outOfTime:
+        return _resultCard(icon: Icons.timer_off_rounded, iconColor: AppTheme.warningAmber, title: "Attendance Closed", subtitle: "You missed the window.", note: "Open: $startHour:00 - $endHour:00", noteColor: AppTheme.warningAmber, borderColor: AppTheme.warningAmber);
+      case _ScanStatus.notRegistered:
+        return _resultCard(icon: Icons.person_off_rounded, iconColor: AppTheme.dangerRed, title: "Not Registered", subtitle: "Your face is not in our database.", note: "Please register first.", noteColor: AppTheme.dangerRed, borderColor: AppTheme.dangerRed);
+      case _ScanStatus.noMatch:
+        return _resultCard(icon: Icons.swap_horiz_rounded, iconColor: Colors.orangeAccent, title: "Wrong Branch", subtitle: "Registered but not in ${widget.selectedBranch}", note: "Please select your correct branch.", noteColor: Colors.orangeAccent, borderColor: Colors.orangeAccent);
+      default:
+        return _resultCard(icon: Icons.face_retouching_off_rounded, iconColor: AppTheme.dangerRed, title: "Detection Failed", subtitle: "Could not process face", note: "Retrying...", noteColor: AppTheme.textDark, borderColor: AppTheme.dangerRed);
+    }
+  }
+  
+  Widget _resultCard({required IconData icon, required Color iconColor, required String title, required String subtitle, required String note, required Color noteColor, required Color borderColor}) {
+    return Container(
+      width: 300.w, padding: EdgeInsets.symmetric(horizontal: 28.w, vertical: 30.h),
+      decoration: BoxDecoration(color: AppTheme.surfaceLight, borderRadius: BorderRadius.circular(24), border: Border.all(color: borderColor.withValues(alpha: 0.7), width: 2), boxShadow: [BoxShadow(color: borderColor.withValues(alpha: 0.3), blurRadius: 30, spreadRadius: 2)]),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(padding: const EdgeInsets.all(18), decoration: BoxDecoration(shape: BoxShape.circle, color: iconColor.withValues(alpha: 0.1), border: Border.all(color: iconColor.withValues(alpha: 0.5), width: 2)), child: Icon(icon, color: iconColor, size: 44.sp)),
+          SizedBox(height: 18.h),
+          Text(title, textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textDark, fontSize: 18.sp, fontWeight: FontWeight.bold)),
+          SizedBox(height: 6.h),
+          Text(subtitle, textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textDark, fontSize: 13.sp)),
+          SizedBox(height: 14.h),
+          Container(padding: EdgeInsets.symmetric(horizontal: 14.w, vertical: 8.h), decoration: BoxDecoration(color: noteColor.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10), border: Border.all(color: noteColor.withValues(alpha: 0.4))), child: Text(note, textAlign: TextAlign.center, style: TextStyle(color: noteColor, fontSize: 12.sp, fontWeight: FontWeight.w500))),
         ],
       ),
     );
